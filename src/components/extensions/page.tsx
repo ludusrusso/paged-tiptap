@@ -1,13 +1,31 @@
 import { Extension } from "@tiptap/core";
-import { Node } from "prosemirror-model";
 import { Plugin, PluginKey } from "prosemirror-state";
-import { Decoration, DecorationSet } from "prosemirror-view";
-import { createRoot } from "react-dom/client";
+import { Decoration, DecorationSet, EditorView } from "prosemirror-view";
+import { Node } from "prosemirror-model";
+
+type PageSizes = {
+  height: number;
+  width: number;
+  margin: number;
+};
+
+type Format = "A4" | "A5";
+
+const supportedFormats: Record<Format, PageSizes> = {
+  A4: {
+    height: 297,
+    width: 210,
+    margin: 20,
+  },
+  A5: {
+    height: 148,
+    width: 105,
+    margin: 5,
+  },
+} as const;
 
 export interface PaginationOptions {
-  pageHeight: number;
-  pageWidth: number;
-  pageMargin: number;
+  format: Format;
 }
 
 declare module "@tiptap/core" {
@@ -18,19 +36,12 @@ declare module "@tiptap/core" {
   }
 }
 
-type PluginState = {
-  dragElem: HTMLElement | null;
-  pos: number;
-};
-
-export const Pagination = Extension.create<PaginationOptions, number>({
+export const Pagination = Extension.create<PaginationOptions>({
   name: "pagination",
 
   addOptions() {
     return {
-      pageHeight: 1123, // A4 height in pixels (297mm)
-      pageWidth: 794, // A4 width in pixels (210mm)
-      pageMargin: 2, // Default margin (1 inch)
+      format: "A4",
     };
   },
 
@@ -47,133 +58,82 @@ export const Pagination = Extension.create<PaginationOptions, number>({
     };
   },
 
+  onCreate() {
+    const editorContainer = getEditorContainer(this.editor.view);
+    setFormat(this.options.format, editorContainer as HTMLElement);
+  },
+
+  // onUpdate() {
+  //   const editorContainer = getEditorContainer(this.editor.view);
+  //   setFormat(this.options.format, editorContainer as HTMLElement);
+  // },
+
   addProseMirrorPlugins() {
-    const pluginKey = new PluginKey<PluginState>("pagination");
+    const pluginKey = new PluginKey("pagination");
 
     return [
-      new Plugin<PluginState>({
+      new Plugin({
         key: pluginKey,
         state: {
-          init: () => {
-            const el = instantiateElement();
-            return {
-              dragElem: el,
-              pos: 0,
-            };
-          },
+          init: () => ({ ...this.options }),
           apply: (tr, value) => {
             const newOptions = tr.getMeta("paginationOptions");
             return newOptions ? { ...value, ...newOptions } : value;
           },
         },
-        // view: (view) => {
-        //   return {
-        //     handleDOMEvents: {
-        //       mouseover: () => {
-        //         const el = pluginKey.getState(view.state)?.dragElem;
-        //         console.log("mouseenter", el);
-        //         return {};
-        //       },
-        //     },
-        //   };
-        // },
         props: {
-          handleDOMEvents: {
-            mouseover: (view, event) => {
-              const target = event.target;
-              if (!target || !(target instanceof Element)) {
-                return;
-              }
-
-              const mainTarget = target.closest(".paraf-over");
-              console.log("mainTarget", mainTarget);
-              if (!mainTarget) {
-                return;
-              }
-
-              const pos = view.posAtDOM(mainTarget, 0);
-              console.log("pos", pos);
-              const el = pluginKey.getState(view.state)?.dragElem;
-              if (!el) {
-                return;
-              }
-
-              const pp = calculateButtonPosition(target);
-              console.log(pp);
-
-              el.style.top = `${pp.top}px`;
-
-              console.log("mouseenter", el);
-            },
-            mouseleave: (view) => {
-              const el = pluginKey.getState(view.state)?.dragElem;
-              if (!el) {
-                return;
-              }
-              el.style.top = "-100px";
-            },
-          },
-
           decorations: (state) => {
             const { doc } = state;
             const decorations: Decoration[] = [];
-            let currentPageHeight = 0;
-            let currentPage = 0;
 
+            let currentPageHeight = 0;
+            let pageNumber = 1;
             const options = pluginKey.getState(state);
-            const { pageHeight, pageMargin, pageWidth } = options;
+            const { format } = options as PaginationOptions;
+            const { height, margin } = formattingInPx(format);
+            const effectivePageHeight = height - 2 * margin;
+
+            const createPageBreak = (pos: number, offset: number) => {
+              return Decoration.widget(pos, () => {
+                const pageBreak = createPageBreakElement(
+                  pageNumber,
+                  margin,
+                  offset
+                );
+                pageNumber++;
+                return pageBreak;
+              });
+            };
 
             doc.descendants((node: Node, pos: number) => {
-              // Calculate node height (more robust method)
+              if (!node.isBlock) return;
+
               const nodeDOM = this.editor.view.nodeDOM(pos);
+              if (!(nodeDOM instanceof HTMLElement)) return;
 
-              const nodeHeight =
-                node.isBlock && nodeDOM instanceof HTMLElement
-                  ? nodeDOM.offsetHeight
-                  : 0;
+              const nodeHeight = nodeDOM.clientHeight;
 
-              if (node.type.name === "paragraph") {
+              if (nodeHeight === 0) return;
+
+              if (currentPageHeight + nodeHeight > effectivePageHeight) {
                 decorations.push(
-                  Decoration.node(pos, pos + node.nodeSize, {
-                    nodeName: "div",
-                    class:
-                      "paraf-over hover:bg-red-200 p-2 px-10 max-w-md m-auto border border-dashed border-red-500",
-                  })
+                  createPageBreak(pos, effectivePageHeight - currentPageHeight)
                 );
+                currentPageHeight = nodeHeight;
+              } else {
+                currentPageHeight += nodeHeight;
               }
-
-              // Check if current page is full
-              if (
-                currentPageHeight + nodeHeight >
-                pageHeight - 2 * pageMargin
-              ) {
-                currentPage++;
-                // Insert page break decoration
-                decorations.push(
-                  Decoration.widget(pos, () => {
-                    const pageBreak = document.createElement("div");
-                    pageBreak.className = "page-break";
-                    pageBreak.style.height = "20px";
-                    pageBreak.style.width = "100%";
-                    pageBreak.style.borderTop = "1px dashed red";
-                    pageBreak.style.marginTop = "10px";
-                    pageBreak.style.marginBottom = "10px";
-                    pageBreak.setAttribute("data-page-break", "true");
-                    return pageBreak;
-                  })
-                );
-
-                // Reset page height
-                currentPageHeight = 0;
-              }
-
-              // Accumulate page height
-              currentPageHeight += nodeHeight;
             });
 
-            const height = pageHeight * (currentPage + 1);
-
-            console.log(0, doc.nodeSize, doc.content.size);
+            decorations.push(
+              Decoration.widget(this.editor.state.doc.content.size, () => {
+                const filler = createLastPageHeightFiller(
+                  format,
+                  currentPageHeight
+                );
+                return filler;
+              })
+            );
 
             return DecorationSet.create(doc, decorations);
           },
@@ -199,58 +159,79 @@ export const Pagination = Extension.create<PaginationOptions, number>({
   },
 });
 
-function instantiateElement() {
-  const reactContainer = document.createElement("div");
-  reactContainer.className = "drag-handle absolute z-[1000]";
-  document.body.appendChild(reactContainer);
+function createPageBreakElement(
+  pageNumber: number,
+  margin: number,
+  offset: number
+) {
+  const pageBreak = document.createElement("div");
+  pageBreak.className = "page-break";
+  pageBreak.style.cssText = `
+    height: ${2 * margin + offset}px;
+    width: calc(100% + ${2 * margin}px);
+    margin: 0 -${margin}px;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  `;
 
-  const root = createRoot(reactContainer);
-  root.render(<div>Handle</div>);
+  pageBreak.setAttribute("data-page-number", String(pageNumber));
 
-  reactContainer.style.top = "10px";
-  reactContainer.style.left = "10px";
+  const pageSeparator = document.createElement("div");
+  pageSeparator.className = "page-separator";
+  pageSeparator.style.cssText = `
+    height: 1px;
+    width: 100%;
+    background: #ccc;
+    margin: 0;
+    @media print {
+      display: none;
+    }
+  `;
 
-  return reactContainer;
+  pageBreak.appendChild(pageSeparator);
+
+  return pageBreak;
 }
 
-function calculateButtonPosition(node: Element) {
-  const compStyle = window.getComputedStyle(node);
-
-  const parsedLineHeight = parseInt(compStyle.lineHeight, 10);
-  const lineHeight = isNaN(parsedLineHeight)
-    ? parseInt(compStyle.fontSize) * 1.2
-    : parsedLineHeight;
-
-  const paddingTop = parseInt(compStyle.paddingTop, 10);
-
-  const rect = absoluteRect(node);
-
-  rect.top += (lineHeight - 24) / 2;
-  rect.top += paddingTop;
-
-  rect.width = 24;
-
-  return rect;
+function setFormat(format: Format, container: HTMLElement) {
+  const { width, margin } = formattingInPx(format);
+  container.style.width = `${width - 2 * margin}px`;
+  container.style.margin = `${margin}px`;
 }
 
-function absoluteRect(node: Element) {
-  const data = node.getBoundingClientRect();
-  const modal = node.closest('[role="dialog"]');
+function createLastPageHeightFiller(format: Format, currentHeight: number) {
+  const { height, margin } = formattingInPx(format);
+  const effectivePageHeight = height - 2 * margin;
+  const lastPageHeight = effectivePageHeight - currentHeight;
 
-  if (modal && window.getComputedStyle(modal).transform !== "none") {
-    const modalRect = modal.getBoundingClientRect();
+  const filler = document.createElement("div");
+  filler.style.height = `${lastPageHeight}px`;
+  filler.style.backgroundColor = "red";
+  return filler;
+}
 
-    return {
-      top: data.top - modalRect.top,
-      left: data.left - modalRect.left,
-      width: data.width,
-      height: data.height,
-    };
-  }
-  return {
-    top: data.top,
-    left: data.left,
-    width: data.width,
-    height: data.height,
+function getEditorContainer(view: EditorView) {
+  return view.dom.closest(".ProseMirror") as HTMLElement;
+}
+
+function getMMtoPxRatio() {
+  const div = document.createElement("div");
+  div.style.height = `1mm`;
+  document.body.appendChild(div);
+  const px = div.offsetHeight;
+  document.body.removeChild(div);
+  return px;
+}
+
+function formattingInPx(format: Format) {
+  const { height, width, margin } = supportedFormats[format];
+  const px = getMMtoPxRatio();
+  const values = {
+    height: height * px,
+    width: width * px,
+    margin: margin * px,
   };
+  return values;
 }
