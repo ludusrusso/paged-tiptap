@@ -105,9 +105,17 @@ export const Pagination = Extension.create<PaginationOptions>({
               });
             };
 
-            doc.descendants((node: Node, pos: number) => {
-              if (!node.isBlock) return;
+            const createTableBreak = (pos: number) => {
+              return Decoration.widget(pos, () => {
+                const pageBreak = createTableBreakElement(margin);
+                pageNumber++;
+                return pageBreak;
+              });
+            };
 
+            doc.descendants((node: Node, pos: number, parent: Node|null) => {
+              if (!node.isBlock) return;
+              if( parent?.type.name !== 'doc' && node.type.name !== 'tableRow' ) return;
               const nodeDOM = this.editor.view.nodeDOM(pos);
               if (!(nodeDOM instanceof HTMLElement)) return;
 
@@ -116,10 +124,16 @@ export const Pagination = Extension.create<PaginationOptions>({
               if (nodeHeight === 0) return;
 
               if (currentPageHeight + nodeHeight > effectivePageHeight) {
-                decorations.push(
-                  createPageBreak(pos, effectivePageHeight - currentPageHeight)
-                );
-                currentPageHeight = nodeHeight;
+                if (node.type.name === 'tableRow') {
+                  console.log('tableRow', pos, effectivePageHeight - currentPageHeight);
+                  decorations.push(createTableBreak(pos));
+                  currentPageHeight = nodeHeight;
+                } else {
+                  decorations.push(
+                    createPageBreak(pos, effectivePageHeight - currentPageHeight)
+                  );
+                  currentPageHeight = nodeHeight;
+                }
               } else {
                 currentPageHeight += nodeHeight;
               }
@@ -158,6 +172,21 @@ export const Pagination = Extension.create<PaginationOptions>({
     ];
   },
 });
+
+function createTableBreakElement(
+  margin: number,
+) {
+  console.log('createTableBreakElement', margin);
+  const tableBreak = document.createElement("tr");
+  tableBreak.className = "table-break";
+  tableBreak.style.cssText = `
+    height: ${2 * margin }px;
+    width: 100%;
+    margin: 0;
+    background: purple;
+  `;
+  return tableBreak;
+}
 
 function createPageBreakElement(
   pageNumber: number,
